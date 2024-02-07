@@ -949,16 +949,16 @@ struct AIEObjectFifoStatefulTransformPass
                                        .getDefiningOp<arith::ConstantOp>()
                                        .getValue();
             int64_t old_upper_value =
-                llvm::cast<IntegerAttr>(old_upper_bound).getInt();
+                llvm::dyn_cast<IntegerAttr>(old_upper_bound).getInt();
             auto old_lower_bound = forLoop.getLowerBound()
                                        .getDefiningOp<arith::ConstantOp>()
                                        .getValue();
             int64_t old_lower_value =
-                llvm::cast<IntegerAttr>(old_lower_bound).getInt();
+                llvm::dyn_cast<IntegerAttr>(old_lower_bound).getInt();
             auto old_step =
                 forLoop.getStep().getDefiningOp<arith::ConstantOp>().getValue();
             int64_t old_step_value =
-                llvm::cast<IntegerAttr>(old_step).getInt();
+                llvm::dyn_cast<IntegerAttr>(old_step).getInt();
             int64_t num_iter =
                 (old_upper_value - old_lower_value) / old_step_value;
 
