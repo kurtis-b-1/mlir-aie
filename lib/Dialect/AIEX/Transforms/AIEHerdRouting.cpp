@@ -218,8 +218,7 @@ struct AIEHerdRoutingPass : AIEHerdRoutingBase<AIEHerdRoutingPass> {
 
       auto sourceHerds =
           cast<SelectOp>(routeOp.getSourceHerds().getDefiningOp());
-      auto destHerds =
-          cast<SelectOp>(routeOp.getDestHerds().getDefiningOp());
+      auto destHerds = cast<SelectOp>(routeOp.getDestHerds().getDefiningOp());
       WireBundle sourceBundle = routeOp.getSourceBundle();
       WireBundle destBundle = routeOp.getDestBundle();
       int sourceChannel = routeOp.getSourceChannelValue();
@@ -227,13 +226,10 @@ struct AIEHerdRoutingPass : AIEHerdRoutingBase<AIEHerdRoutingPass> {
 
       HerdOp sourceHerd =
           cast<HerdOp>(sourceHerds.getStartHerd().getDefiningOp());
-      IterOp sourceIterX =
-          cast<IterOp>(sourceHerds.getIterX().getDefiningOp());
-      IterOp sourceIterY =
-          cast<IterOp>(sourceHerds.getIterY().getDefiningOp());
+      IterOp sourceIterX = cast<IterOp>(sourceHerds.getIterX().getDefiningOp());
+      IterOp sourceIterY = cast<IterOp>(sourceHerds.getIterY().getDefiningOp());
 
-      HerdOp destHerd =
-          cast<HerdOp>(destHerds.getStartHerd().getDefiningOp());
+      HerdOp destHerd = cast<HerdOp>(destHerds.getStartHerd().getDefiningOp());
       IterOp destIterX = cast<IterOp>(destHerds.getIterX().getDefiningOp());
       IterOp destIterY = cast<IterOp>(destHerds.getIterY().getDefiningOp());
 
