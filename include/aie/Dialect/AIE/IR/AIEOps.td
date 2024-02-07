@@ -1171,7 +1171,7 @@ def AIE_UseLockOp: AIE_Op<"use_lock", []> {
       return 1;
     }
     LockOp getLockOp() {
-      return llvm::dyn_cast<xilinx::AIE::LockOp>(getLock().getDefiningOp());
+      return llvm::cast<xilinx::AIE::LockOp>(getLock().getDefiningOp());
     }
   }];
 }
