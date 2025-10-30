@@ -7,11 +7,12 @@
 import argparse
 import numpy as np
 
-from aie.iron import Kernel, ObjectFifo, Program, Runtime, Worker, str_to_dtype
+from aie.iron import Kernel, ObjectFifo, Program, GlobalBuffer, Runtime, Worker, WorkerRuntimeBarrier, str_to_dtype
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
 from aie.iron.controlflow import range_
 from aie.helpers.taplib import TensorAccessSequence, TensorTiler2D
+import aie.dialects.index as index_dialect
 
 
 microkernel_mac_dim_map = {
@@ -231,6 +232,17 @@ def my_matmul(
     C_l1l2_fifos = [[None] * n_aie_cols for _ in range(n_aie_rows)]
     C_l2l3_fifos = [None] * n_aie_cols
 
+    # Runtime parameters
+    rtps = [[GlobalBuffer(
+                np.ndarray[(2,), np.dtype[np.int32]],
+                name=f"rtp{row}_{col}",
+                initial_value=np.array([0, 0], dtype=np.int32),
+                use_write_rtp=True,
+            ) for col in range(n_aie_cols)] for row in range(n_aie_rows)]
+
+    # Create barriers to synchronize individual workers with the runtime sequence
+    workerBarriers = [[WorkerRuntimeBarrier() for col in range(n_aie_cols)] for row in range(n_aie_rows)]
+
     # Input A
     for i in range(n_shim_mem_A):
         A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, name=f"A_L3L2_{i}", depth=fifo_depth)
@@ -309,15 +321,18 @@ def my_matmul(
             C_l1l2_fifos[j][col] = c_tmp_fifos[j]
 
     # Tasks for each worker to perform
-    def core_fn(in_a, in_b, out_c, zero, matmul):
+    def core_fn(in_a, in_b, out_c, zero, matmul, my_rtp, barrier):
+        barrier.wait_for_value(1)
+        rtp_K_div_k = my_rtp[0]
+        rtp_n_tiles_per_core = my_rtp[1]
         loop = range(1)  # Workaround for issue #1547
-        if n_tiles_per_core > 1:
-            loop = range_(n_tiles_per_core)
+        if rtp_n_tiles_per_core > 1:
+            loop = range_(rtp_n_tiles_per_core)
         for _ in loop:
             elem_out = out_c.acquire(1)
             zero(elem_out)
 
-            for _ in range_(K // k):
+            for _ in range_(rtp_K_div_k):
                 elem_in_a = in_a.acquire(1)
                 elem_in_b = in_b.acquire(1)
                 matmul(elem_in_a, elem_in_b, elem_out)
@@ -339,6 +354,8 @@ def my_matmul(
                         C_l1l2_fifos[row][col].prod(),
                         zero_kernel,
                         matmul_kernel,
+                        rtps[row][col],
+                        workerBarriers[row][col],
                     ],
                     placement=Tile(tile_col, tile_row),
                     stack_size=0xD00,
@@ -396,6 +413,21 @@ def my_matmul(
     rt = Runtime()
     with rt.sequence(A_ty, B_ty, C_ty) as (A, B, C):
         rt.start(*workers)
+
+        # Set runtime parameters
+        def set_rtps(*args):
+            for row, rtps_row in enumerate(args):
+                for col, rtp_row_col in enumerate(rtps_row):
+                    rtp_row_col[0] = K // k
+                    rtp_row_col[1] = n_tiles_per_core
+
+        rt.inline_ops(set_rtps, rtps)
+
+        # Set the barriers to 1 to allow the worker to read the
+        # runtime parameters and start the computation
+        for row in range(n_aie_rows):
+            for col in range(n_aie_cols):
+                rt.set_barrier(workerBarriers[row][col], 1)
 
         # Task groups will be used to determine when to sync/await/free DMA runtime ops
         tg = rt.task_group()
