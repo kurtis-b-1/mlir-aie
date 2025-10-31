@@ -108,7 +108,6 @@ def my_matmul(
     generate_taps=False,
 ):
     n_aie_rows = 4
-    n_aie_cores = n_aie_rows * n_aie_cols
 
     dtype_in = str_to_dtype(dtype_in_str)
     dtype_out = str_to_dtype(dtype_out_str)
@@ -136,14 +135,30 @@ def my_matmul(
             "Invalid configuration: NPU2 (Strix/Strix Halo/Krackan) has 8 columns"
         )
 
+    # When using more AIE columns than n_aie_rows (4) (applicable to NPU2),
+    # restrict the number of shim/mem tiles to n_aie_rows,
+    # since we have only n_aie_rows row tiles for matrix A
+    # When using n_aie_rows (4) or less AIE columns (both NPU and NPU2),
+    # the number of shim/mem tiles are equal to n_aie_cols.
+    # We use the distribute pattern in object FIFO (see linking for A below),
+    # since we have n_aie_rows (4) row tiles for matrix A
+    n_shim_mem_A = min(n_aie_cols, n_aie_rows)
+
+    # Integer division when n_aie_cols < 4, otherwise set to 1
+    n_A_tiles_per_shim = n_aie_rows // n_aie_cols if n_aie_cols < 4 else 1
+
+    mem_tile_m_A = m * n_A_tiles_per_shim
+    mem_tile_m_C = m * n_aie_rows
+    mem_tile_n = n * n_aie_cols
+
     # Input matrix A:
     # Conceptually, we divide input A into (m * n_rows, k)-sized blocks. These
     # blocks are _broadcast_ across AIE core columns, then _distributed_ across
     # rows, s.t. each of the n_rows compute cores in a column receives a
     # contiguous (m, k)-sized block of A.
     assert (
-        M % (m * n_aie_rows) == 0
-    ), """A must be tileable into (m * n_aie_rows, k)-sized blocks"""
+        M % mem_tile_m_A == 0
+    ), """A must be tileable into (m * n_A_tiles_per_shim, k)-sized blocks"""
 
     # Both A and B are tiled in the K dimension into size k.
     assert K % k == 0
@@ -152,8 +167,17 @@ def my_matmul(
     # Conceptually, we do the same as with A, but instead of broadcasting
     # across columns we broadcast across rows and distribute across columns.
     assert (
-        N % (n * n_aie_cols) == 0
+        N % mem_tile_n == 0
     ), """B must be tileable into (k, n * n_aie_cols)-sized blocks"""
+
+    # Output matrix C:
+    # Conceptually, we divide output C into (m * n_rows, n)-sized blocks. These
+    # blocks are _distributed_ across AIE core columns, and _joined_ across
+    # rows, s.t. each of the n_rows compute cores in a column send a
+    # contiguous (m, n)-sized block of C.
+    assert (
+        M % mem_tile_m_C == 0
+    ), """C must be tileable into (m * n_aie_rows, n)-sized blocks"""
 
     assert m % r == 0
     assert k % s == 0
@@ -164,23 +188,6 @@ def my_matmul(
     # loop unrollings. Reducing the depth to 1 here will work around that at
     # a big performance cost.
     fifo_depth = 2
-
-    n_tiles_per_core = (M // m) * (N // n) // n_aie_cores
-
-    # When using more AIE columns than n_aie_rows (4) (applicable to NPU2),
-    # restrict the number of shim/mem tiles to n_aie_rows,
-    # since we have only n_aie_rows row tiles for matrix A
-    if n_aie_cols > n_aie_rows:
-        n_shim_mem_A = n_aie_rows
-    # When using n_aie_rows (4) or less AIE columns (both NPU and NPU2),
-    # the number of shim/mem tiles are equal to n_aie_cols.
-    # We use the distribute pattern in object FIFO (see linking for A below),
-    # since we have n_aie_rows (4) row tiles for matrix A
-    else:
-        n_shim_mem_A = n_aie_cols
-
-    # Integer division when n_aie_cols < 4, otherwise set to 1
-    n_A_tiles_per_shim = n_aie_rows // n_aie_cols if n_aie_cols < 4 else 1
 
     if dev == "npu":
         if n_aie_cols == 1:
@@ -202,9 +209,9 @@ def my_matmul(
     A_ty = np.ndarray[(M * K,), np.dtype[dtype_in]]
     B_ty = np.ndarray[(K * N,), np.dtype[dtype_in]]
     C_ty = np.ndarray[(M * N,), np.dtype[dtype_out]]
-    A_l2_ty = np.ndarray[(m * k * n_A_tiles_per_shim,), np.dtype[dtype_in]]
+    A_l2_ty = np.ndarray[(mem_tile_m_A * k,), np.dtype[dtype_in]]
     B_l2_ty = np.ndarray[(k * n,), np.dtype[dtype_in]]
-    C_l2_ty = np.ndarray[(m * n * n_aie_rows,), np.dtype[dtype_out]]
+    C_l2_ty = np.ndarray[(mem_tile_m_C * n,), np.dtype[dtype_out]]
     A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
     B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
     C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
@@ -367,14 +374,17 @@ def my_matmul(
     # tb = transfer block; block of transfers before sync call
     tb_max_n_rows = 4
     tb_n_rows = tb_max_n_rows // 2
+    K_div_k = K // k
+    n_c_col_tiles_per_core = N // mem_tile_n
+    n_c_row_tiles_per_core = M // mem_tile_m_C
 
     # Define tensor access patterns (tiling) for A, B, and C
     A_tiles = TensorTiler2D.group_tiler(
         (M, K),  # Size of A matrix
-        (m * n_A_tiles_per_shim, k),  # Size of A (smallest) tile
-        (1, K // k),  # Size of "group" of tiles
+        (mem_tile_m_A, k),  # Size of A (smallest) tile
+        (1, K_div_k),  # Size of "group" of tiles
         # Repeat data so can distribute across whole column
-        pattern_repeat=N // n // n_aie_cols,
+        pattern_repeat=n_c_col_tiles_per_core,
         prune_step=False,
     )
     if b_col_maj:
@@ -382,7 +392,7 @@ def my_matmul(
             (N, K),  # Size of B matrix
             (n, k),  # Size of B tile
             # Number of tiles per transfer in each dimension (whole col, partial row)
-            tile_group_repeats=(N // n // n_aie_cols, K // k),
+            tile_group_repeats=(n_c_col_tiles_per_core, K_div_k),
             # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
             tile_group_steps=(n_aie_cols, 1),
             prune_step=False,
@@ -392,7 +402,7 @@ def my_matmul(
             (K, N),  # Size of B matrix
             (k, n),  # Size of B tile
             # Number of tiles per transfer in each dimension (whole col, partial row)
-            tile_group_repeats=(K // k, N // n // n_aie_cols),
+            tile_group_repeats=(K_div_k, n_c_col_tiles_per_core),
             # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
             tile_group_steps=(1, n_aie_cols),
             tile_group_col_major=True,  # Send all tiles in column before moving on to next column
@@ -400,9 +410,9 @@ def my_matmul(
         )
     C_tiles = TensorTiler2D.step_tiler(
         (M, N),  # Size of C matrix
-        (m * n_aie_rows, n),  # Size of C tile
+        (mem_tile_m_C, n),  # Size of C tile
         # Number of tiles per transfer in each dimension (partial col, partial row)
-        tile_group_repeats=(tb_n_rows, N // n // n_aie_cols),
+        tile_group_repeats=(tb_n_rows, n_c_col_tiles_per_core),
         # Collect every n_aie_cols row at a time (mirroring how we sent in B data)
         tile_group_steps=(1, n_aie_cols),
             prune_step=False,
@@ -418,8 +428,8 @@ def my_matmul(
         def set_rtps(*args):
             for row, rtps_row in enumerate(args):
                 for col, rtp_row_col in enumerate(rtps_row):
-                    rtp_row_col[0] = K // k
-                    rtp_row_col[1] = n_tiles_per_core
+                    rtp_row_col[0] = K_div_k
+                    rtp_row_col[1] = n_c_row_tiles_per_core * n_c_col_tiles_per_core
 
         rt.inline_ops(set_rtps, rtps)
 
@@ -431,7 +441,7 @@ def my_matmul(
 
         # Task groups will be used to determine when to sync/await/free DMA runtime ops
         tg = rt.task_group()
-        for tb in range(ceildiv(M // m // n_aie_rows, tb_max_n_rows)):
+        for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
                 if c_index >= len(C_tiles):
                     # May not have pong iteration in some cases
@@ -439,7 +449,7 @@ def my_matmul(
 
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
                 current_tb_n_rows = min(
-                    [tb_max_n_rows // 2, M // m // n_aie_rows - row_base]
+                    [tb_max_n_rows // 2, n_c_row_tiles_per_core - row_base]
                 )
 
                 for col in range(n_aie_cols):
