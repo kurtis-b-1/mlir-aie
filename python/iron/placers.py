@@ -89,6 +89,7 @@ class SequentialPlacer(Placer):
         for worker in workers:
             # This worker has already been placed
             if isinstance(worker.tile, Tile):
+                print(device.get_hardware_wrap_step_iter_bits(worker.tile))
                 if not worker.tile in computes:
                     raise ValueError(
                         f"Partial Placement Error: "

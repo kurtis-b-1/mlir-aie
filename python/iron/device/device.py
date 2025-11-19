@@ -191,6 +191,58 @@ class Device(Resolvable):
         else:
             return self.get_num_dest_switchbox_connections(tile)
 
+    def get_hardware_wrap_step_iter_bits(self, t: Tile) -> tuple:
+        """Returns hardware wrap, step, and iter bits based on the tile type.
+
+        Returns:
+            tuple: Wrap, step, and iter bits.
+        """
+        wrap_bits = 0
+        step_bits = 0
+        iter_bits = 6
+        if self._tm.is_shim_noc_or_pl_tile(t._col, t._row):
+            step_bits = 20  # XAIEMLGBL_NOC_MODULE_DMA_BD0_3_D0_STEPSIZE_WIDTH
+            wrap_bits = 10  # XAIEMLGBL_NOC_MODULE_DMA_BD0_3_D0_WRAP_WIDTH
+        elif self._tm.is_mem_tile(t._col, t._row):
+            step_bits = 17  # XAIEMLGBL_MEM_TILE_MODULE_DMA_BD0_2_D0_STEPSIZE_WIDTH
+            wrap_bits = 10  # XAIEMLGBL_MEM_TILE_MODULE_DMA_BD0_2_D0_WRAP_WIDTH
+        elif self._tm.is_core_tile(t._col, t._row):
+            step_bits = 13  # XAIEMLGBL_MEMORY_MODULE_DMA_BD0_2_D0_STEPSIZE_WIDTH
+            wrap_bits = 8  # XAIEMLGBL_MEMORY_MODULE_DMA_BD0_3_D0_WRAP_WIDTH
+        else:
+            raise ValueError(
+                f"Unsupported tile type at ({t._col},{t._row}) Must be ShimNOC, Mem or Core."
+            )
+        return (wrap_bits, step_bits, iter_bits)
+
+    def get_hardware_size_limit(self, t: Tile, dim: int) -> int | None:
+        """Returns hardware size limit for the device in a spcecific dimension.
+        Some hardware sizes may not have a limit.
+
+        Returns:
+            int: Hardware size limit for the specified dimension
+        """
+        wrap_bits, step_bits, iter_bits = get_hardware_wrap_step_iter_bits(t)
+        if dim < 2:
+            return (1 << wrap_bits) - 1
+        elif dim == 3:
+            return 1 << iter_bits
+        return None
+
+    def get_hardware_stride_limit(self, t: Tile, dim: int, hw_size: int) -> int | None:
+        """Returns hardware stride limit for the device in a spcecific dimension.
+        The hardware size needs to be passed in since the last dimension only has a limit when its size is greater than 1.
+
+        Returns:
+            int: Hardware stride limit for the specified dimension
+        """
+        wrap_bits, step_bits, iter_bits = get_hardware_wrap_step_iter_bits(t)
+        if dim < 3:
+            return 1 << step_bits
+        elif dim == 3 and hw_size > 1:
+            return 1 << step_bits
+        return None
+
     def is_legal_mem_affinity(self, src_tile: Tile, dst_tile: Tile) -> bool:
         """Returns whether memory on a destination can be accessed by a source.
         Returns:
